@@ -121,7 +121,7 @@
   // Экрана телевизора с Mac не видно, поэтому, если видео 6 с не идёт, мод сам
   // показывает панель: версия мода, состояние <video>, поддержка MSE, последние ошибки
   // и неудачные запросы. Красная кнопка пульта (403) — показать/скрыть вручную.
-  var MOD_VERSION = '0.1.3';
+  var MOD_VERSION = '0.1.4';
   var logs = [];
   function log(s) {
     var t = new Date();
@@ -212,6 +212,134 @@
   window.addEventListener('keydown', function (e) {
     if (e.keyCode === 403) { panelOn = !panelOn; render(); }
   }, true);
+  // Поток через hls.js. Плеер webOS-сборки кладёт ссылку на m3u8 прямо в video.src
+  // (на LG телевизор играет HLS сам). Движок Samsung отвечает canPlayType «maybe», грузит
+  // описание потока, но кадров не отдаёт: на ТВ видели ready=1, 0x0 и вечный waiting.
+  // Поэтому такие ссылки перехватываем и играем через hls.js + MediaSource (MSE на ТВ есть,
+  // CDN Rutube отдаёт CORS для rutube.ru). hls.js 1.4 — сборка в ES5, подходит старому движку.
+  var HLS_URL = 'https://cdn.jsdelivr.net/npm/hls.js@1.4.14/dist/hls.min.js';
+  var hlsQueue = [];
+  (function loadHls() {
+    var s = document.createElement('script');
+    s.src = HLS_URL;
+    s.onload = function () {
+      log('hls.js загружен, MSE ' + (window.Hls && Hls.isSupported() ? 'да' : 'нет'));
+      var q = hlsQueue; hlsQueue = [];
+      for (var i = 0; i < q.length; i++) q[i]();
+    };
+    s.onerror = function () { log('hls.js не загрузился'); var q = hlsQueue; hlsQueue = []; for (var i = 0; i < q.length; i++) q[i](); };
+    // TizenBrew подмешивает мод до появления <html> — ждём, куда вставить тег
+    (function append() {
+      var parent = document.head || document.documentElement;
+      if (parent) parent.appendChild(s); else setTimeout(append, 10);
+    })();
+  })();
+
+  // Плеер ставит поток не в video.src, а дочерним <source src="…m3u8"> (проверено в Chrome).
+  // Ссылку у <source> забираем себе (родной плеер её не видит) и подключаем hls.js к <video>.
+  // hls.js сам пишет video.src = blob:… и зовёт removeAttribute('src')/load() — это пропускаем.
+  var srcDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'src');
+  var sourceDesc = Object.getOwnPropertyDescriptor(HTMLSourceElement.prototype, 'src');
+  var origLoad = HTMLMediaElement.prototype.load;
+  var origSetAttr = Element.prototype.setAttribute;
+  var origRemoveAttr = Element.prototype.removeAttribute;
+  function isHlsUrl(u) { return /\.m3u8(\?|$)|\/route\/[0-9a-f]{32}/i.test(String(u || '')); }
+  function detachHls(el) {
+    var h = el.__hls;
+    el.__hls = null;
+    el.__hlsSrc = null;
+    if (h) { el.__hlsInternal = true; try { h.destroy(); } catch (e) { /* уже уничтожен */ } el.__hlsInternal = false; }
+  }
+  function attachHls(el, url) {
+    if (el.__hlsSrc === url) return; // тот же поток уже подключён или ждёт hls.js
+    detachHls(el);
+    el.__hlsSrc = url;
+    function go() {
+      if (el.__hlsSrc !== url) return; // ссылку успели сменить
+      if (!window.Hls || !Hls.isSupported()) {
+        log('hls.js недоступен — отдаю родному плееру');
+        el.__hlsSrc = null;
+        srcDesc.set.call(el, url);
+        return;
+      }
+      var h = new Hls({ maxBufferLength: 30 });
+      el.__hls = h;
+      h.on(Hls.Events.MANIFEST_PARSED, function (ev, d) { log('hls: поток разобран, качеств ' + (d.levels ? d.levels.length : '?')); });
+      h.on(Hls.Events.ERROR, function (ev, d) {
+        if (!d.fatal) return;
+        log('hls fatal ' + d.type + ' ' + d.details);
+        if (d.type === Hls.ErrorTypes.NETWORK_ERROR) h.startLoad();
+        else if (d.type === Hls.ErrorTypes.MEDIA_ERROR) h.recoverMediaError();
+      });
+      el.__hlsInternal = true;
+      h.loadSource(url);
+      h.attachMedia(el);
+      el.__hlsInternal = false;
+      log('видео через hls.js');
+    }
+    if (window.Hls) go(); else hlsQueue.push(go);
+  }
+  function claimSource(srcEl, url) {
+    srcEl.__hlsUrl = url;
+    var v = srcEl.parentNode;
+    if (v && v.tagName === 'VIDEO') attachHls(v, url);
+  }
+
+  Object.defineProperty(HTMLMediaElement.prototype, 'src', {
+    configurable: true,
+    enumerable: srcDesc.enumerable,
+    get: function () { return this.__hlsSrc || srcDesc.get.call(this); },
+    set: function (v) {
+      if (this.tagName === 'VIDEO' && isHlsUrl(v)) { attachHls(this, v); return; }
+      if (!this.__hlsInternal && !/^blob:/.test(String(v))) detachHls(this);
+      srcDesc.set.call(this, v);
+    }
+  });
+  Object.defineProperty(HTMLSourceElement.prototype, 'src', {
+    configurable: true,
+    enumerable: sourceDesc.enumerable,
+    get: function () { return this.__hlsUrl || sourceDesc.get.call(this); },
+    set: function (v) {
+      if (isHlsUrl(v)) { claimSource(this, v); return; }
+      this.__hlsUrl = null;
+      sourceDesc.set.call(this, v);
+    }
+  });
+  Element.prototype.setAttribute = function (name, value) {
+    var isSrc = String(name).toLowerCase() === 'src';
+    if (isSrc && isHlsUrl(value)) {
+      if (this.tagName === 'VIDEO') { attachHls(this, value); return; }
+      if (this.tagName === 'SOURCE') { claimSource(this, value); return; }
+    }
+    return origSetAttr.apply(this, arguments);
+  };
+  Element.prototype.removeAttribute = function (name) {
+    if (this.tagName === 'VIDEO' && String(name).toLowerCase() === 'src' && !this.__hlsInternal) detachHls(this);
+    return origRemoveAttr.apply(this, arguments);
+  };
+  // load() сбрасывает видеоэлемент и отрывает MediaSource — при hls.js он не нужен
+  HTMLMediaElement.prototype.load = function () {
+    if (this.__hlsSrc && !this.__hlsInternal) return;
+    return origLoad.apply(this, arguments);
+  };
+  // <source> с потоком вставили в <video> уже после того, как ему дали ссылку
+  (function watch() {
+    if (!document.documentElement) { setTimeout(watch, 10); return; }
+    new MutationObserver(function (muts) {
+      for (var i = 0; i < muts.length; i++) {
+        var added = muts[i].addedNodes;
+        for (var j = 0; j < added.length; j++) {
+          var n = added[j];
+          if (n.nodeType !== 1) continue;
+          var list = n.tagName === 'SOURCE' ? [n] : (n.querySelectorAll ? n.querySelectorAll('source') : []);
+          for (var k = 0; k < list.length; k++) {
+            if (list[k].__hlsUrl && list[k].parentNode && list[k].parentNode.tagName === 'VIDEO') attachHls(list[k].parentNode, list[k].__hlsUrl);
+          }
+        }
+      }
+    }).observe(document.documentElement, { childList: true, subtree: true });
+  })();
+
   // Выход. Кнопка «Выйти» в webOS-сборке зовёт webOS.platformBack() — на LG это закрывает
   // приложение, а на Samsung ничего не делает, и приложение просто уходит на главную.
   // Подменяем platformBack на выход из приложения Tizen (TizenBrew); объект webOS
