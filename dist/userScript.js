@@ -116,4 +116,101 @@
     hintEl.style.display = text ? 'block' : 'none';
   }
   window.__rutubeNoAds.hint = function () { return hintEl ? hintEl.textContent : ''; };
+
+  // ---------- Диагностика (временно, пока видео на ТВ не заиграет) ----------
+  // Экрана телевизора с Mac не видно, поэтому, если видео 6 с не идёт, мод сам
+  // показывает панель: версия мода, состояние <video>, поддержка MSE, последние ошибки
+  // и неудачные запросы. Красная кнопка пульта (403) — показать/скрыть вручную.
+  var MOD_VERSION = '0.1.2';
+  var logs = [];
+  function log(s) {
+    var t = new Date();
+    logs.push(('0' + t.getMinutes()).slice(-2) + ':' + ('0' + t.getSeconds()).slice(-2) + ' ' + String(s).slice(0, 140));
+    if (logs.length > 14) logs.shift();
+  }
+  function short(u) {
+    try { var a = document.createElement('a'); a.href = u; return a.hostname.replace('rutube.ru', 'r') + a.pathname.slice(0, 40); }
+    catch (e) { return String(u).slice(0, 50); }
+  }
+  window.addEventListener('error', function (e) {
+    if (e.target && e.target !== window && e.target.tagName) log('load fail ' + e.target.tagName + ' ' + short(e.target.src || e.target.href || ''));
+    else log('js: ' + (e.message || e.error));
+  }, true);
+  window.addEventListener('unhandledrejection', function (e) {
+    var r = e.reason; log('promise: ' + (r && (r.name + ' ' + (r.message || '')) || r));
+  });
+  var XO = XMLHttpRequest.prototype.open, XS = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.open = function (m, u) { this.__u = u; return XO.apply(this, arguments); };
+  XMLHttpRequest.prototype.send = function () {
+    var x = this;
+    x.addEventListener('loadend', function () {
+      if (x.status === 0 || x.status >= 400) log('xhr ' + x.status + ' ' + short(x.__u));
+    });
+    return XS.apply(this, arguments);
+  };
+  if (window.fetch) {
+    var F = window.fetch;
+    window.fetch = function (u) {
+      var url = typeof u === 'string' ? u : (u && u.url);
+      return F.apply(this, arguments).then(function (r) {
+        if (!r.ok) log('fetch ' + r.status + ' ' + short(url));
+        return r;
+      }, function (err) { log('fetch fail ' + short(url) + ' ' + err); throw err; });
+    };
+  }
+  ['loadstart', 'loadedmetadata', 'canplay', 'playing', 'waiting', 'stalled', 'error', 'abort', 'emptied'].forEach(function (n) {
+    document.addEventListener(n, function (e) {
+      var v = e.target;
+      if (!v || v.tagName !== 'VIDEO' || /preloader/.test(v.currentSrc || '')) return;
+      log('video ' + n + (n === 'error' && v.error ? ' code ' + v.error.code + ' ' + (v.error.message || '') : ''));
+    }, true);
+  });
+
+  var panel = null, panelOn = false, stuckSince = 0;
+  function mainVideo() {
+    var vs = document.querySelectorAll('video');
+    for (var i = 0; i < vs.length; i++) if (!/preloader/.test(vs[i].currentSrc || '')) return vs[i];
+    return null;
+  }
+  function mse(type) {
+    try { return window.MediaSource && MediaSource.isTypeSupported(type) ? 'да' : 'нет'; } catch (e) { return '?'; }
+  }
+  function render() {
+    if (!panelOn || !document.body) { if (panel) panel.style.display = 'none'; return; }
+    if (!panel) {
+      panel = document.createElement('pre');
+      panel.style.cssText = 'position:fixed;left:2%;top:3%;max-width:60%;z-index:2147483646;margin:0;' +
+        'background:rgba(0,0,0,.85);color:#9f9;font:18px/1.3 monospace;padding:12px 16px;border-radius:10px;' +
+        'white-space:pre-wrap;pointer-events:none';
+      document.body.appendChild(panel);
+    }
+    var v = mainVideo();
+    var lines = [
+      'Rutube мод ' + MOD_VERSION + ' · реклама снята: ' + window.__rutubeNoAds.stripped,
+      'UA: ' + navigator.userAgent.slice(0, 70),
+      'MSE: ' + (window.MediaSource ? 'есть' : 'НЕТ') + ' · h264 ' + mse('video/mp4; codecs="avc1.42c01f,mp4a.40.2"') +
+        ' · hls родной ' + (document.createElement('video').canPlayType('application/vnd.apple.mpegurl') || 'нет') +
+        ' · webOS ' + typeof window.webOS + ' · tizen ' + typeof window.tizen,
+      v ? 'video: t=' + v.currentTime.toFixed(1) + ' paused=' + v.paused + ' muted=' + v.muted + ' ready=' + v.readyState +
+        ' net=' + v.networkState + ' ' + v.videoWidth + 'x' + v.videoHeight + (v.error ? ' ERR ' + v.error.code : '') +
+        '\nsrc: ' + short(v.currentSrc || v.src || '(нет)') : 'video: нет элемента',
+      'адрес: ' + location.hash.slice(0, 60),
+      '--- последние события ---'
+    ].concat(logs);
+    panel.textContent = lines.join('\n');
+    panel.style.display = 'block';
+  }
+  setInterval(function () {
+    var v = mainVideo();
+    var onVideo = /video\//.test(location.hash);
+    var moving = v && !v.paused && v.readyState >= 3;
+    if (onVideo && !moving) { if (!stuckSince) stuckSince = Date.now(); }
+    else stuckSince = 0;
+    if (stuckSince && Date.now() - stuckSince > 6000) panelOn = true;
+    render();
+  }, 1000);
+  window.addEventListener('keydown', function (e) {
+    if (e.keyCode === 403) { panelOn = !panelOn; render(); }
+  }, true);
+  log('мод ' + MOD_VERSION + ' загружен');
 })();

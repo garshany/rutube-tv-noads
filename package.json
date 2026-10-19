@@ -1,7 +1,7 @@
 {
   "name": "rutube-tv-noads",
   "appName": "Rutube TV",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "TizenBrew mod: official Rutube TV web app without video ads.",
   "packageType": "mods",
   "websiteURL": "https://rutube.ru/tv-release/webos.server/webos/",
