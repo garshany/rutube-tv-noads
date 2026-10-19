@@ -76,4 +76,44 @@
   }
   window.addEventListener('keydown', retarget, true);
   window.addEventListener('keyup', retarget, true);
+
+  // Автозапуск. Плеер webOS-сборки сам зовёт video.play() после загрузки — на LG это
+  // разрешено, а браузерный движок может запретить звук без нажатия (NotAllowedError):
+  // видео загружено, но стоит, и крутится вечная заглушка. Тогда запускаем без звука
+  // (это разрешено всегда) и возвращаем звук при первом нажатии на пульт.
+  var origPlay = HTMLMediaElement.prototype.play;
+  var mutedByMod = null;
+  HTMLMediaElement.prototype.play = function () {
+    var el = this;
+    var p = origPlay.apply(el, arguments);
+    if (!p || !p.then) return p;
+    return p.then(null, function (err) {
+      if (!err || err.name !== 'NotAllowedError' || el.muted) throw err;
+      el.muted = true;
+      mutedByMod = el;
+      showHint('Нажмите любую кнопку, чтобы включить звук');
+      return origPlay.call(el);
+    });
+  };
+  window.addEventListener('keydown', function () {
+    if (mutedByMod) {
+      mutedByMod.muted = false;
+      mutedByMod = null;
+      showHint('');
+    }
+  }, true);
+
+  var hintEl = null;
+  function showHint(text) {
+    if (!document.body) return;
+    if (!hintEl) {
+      hintEl = document.createElement('div');
+      hintEl.style.cssText = 'position:fixed;left:50%;bottom:8%;transform:translateX(-50%);z-index:2147483647;' +
+        'background:rgba(0,0,0,.75);color:#fff;font:28px sans-serif;padding:14px 26px;border-radius:12px;pointer-events:none';
+      document.body.appendChild(hintEl);
+    }
+    hintEl.textContent = text;
+    hintEl.style.display = text ? 'block' : 'none';
+  }
+  window.__rutubeNoAds.hint = function () { return hintEl ? hintEl.textContent : ''; };
 })();
