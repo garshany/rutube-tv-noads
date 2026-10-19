@@ -121,7 +121,7 @@
   // Экрана телевизора с Mac не видно, поэтому, если видео 6 с не идёт, мод сам
   // показывает панель: версия мода, состояние <video>, поддержка MSE, последние ошибки
   // и неудачные запросы. Красная кнопка пульта (403) — показать/скрыть вручную.
-  var MOD_VERSION = '0.1.2';
+  var MOD_VERSION = '0.1.3';
   var logs = [];
   function log(s) {
     var t = new Date();
@@ -212,5 +212,32 @@
   window.addEventListener('keydown', function (e) {
     if (e.keyCode === 403) { panelOn = !panelOn; render(); }
   }, true);
+  // Выход. Кнопка «Выйти» в webOS-сборке зовёт webOS.platformBack() — на LG это закрывает
+  // приложение, а на Samsung ничего не делает, и приложение просто уходит на главную.
+  // Подменяем platformBack на выход из приложения Tizen (TizenBrew); объект webOS
+  // создаёт бандл позже нас, поэтому ловим момент его записи в window.
+  function exitApp() {
+    log('выход: tizen=' + typeof window.tizen);
+    try { window.tizen.application.getCurrentApplication().exit(); return true; }
+    catch (e) { log('выход через tizen не удался: ' + e); }
+    try { window.close(); } catch (e2) { /* не вышло — ниже лог */ }
+    log('выход недоступен в этом окружении');
+    return false;
+  }
+  function patchWebOS(w) {
+    if (w && typeof w === 'object' && !w.__rutubeExit) {
+      try { w.platformBack = exitApp; w.__rutubeExit = true; } catch (e) { log('webOS patch: ' + e); }
+    }
+  }
+  var webOSObj = window.webOS;
+  patchWebOS(webOSObj);
+  try {
+    Object.defineProperty(window, 'webOS', {
+      configurable: true,
+      get: function () { return webOSObj; },
+      set: function (v) { webOSObj = v; patchWebOS(v); }
+    });
+  } catch (e) { log('webOS defineProperty: ' + e); }
+
   log('мод ' + MOD_VERSION + ' загружен');
 })();
